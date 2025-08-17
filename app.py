@@ -7,7 +7,8 @@ from pathlib import Path
 from autolearn import AutoLearner
 import link  # our link.py helper
 import scrape
-import image_search  # NEW
+import image_search  # image returner
+import quickfacts  # quick facts extractor (email, phone, address...)
 
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -237,33 +238,50 @@ def list_all_topics() -> list[str]:
 # ---------- Orchestrate: route → topic lookup(s) → fallback ----------
 def generate_reply(user_message):
     sid, sess = get_or_make_sid()
+    reply = None
 
-    # 0) Image requests (handled first)
-    handled, img_reply = image_search.handle(user_message)
-    if handled:
-        reply = img_reply
-    else:
-        reply = None
+    # A) If we're mid-learning, handle that FIRST and short-circuit.
+    learn_state = (sess.get("vars") or {}).get("learn", {}).get("state", "idle")
+    if learn_state in ("await_topic", "await_reply", "await_new_topic_keywords"):
+        handled, learn_reply = LEARNER.handle(sess, user_message)
+        if handled:
+            reply = learn_reply
 
-    # 1) Scrape commands (if not an image request)
+    # B) Not mid-learning (or learner didn't handle) → normal pipeline
     if reply is None:
+        # 0) Images
+        handled, img_reply = image_search.handle(user_message)
+        if handled:
+            reply = img_reply
+
+    if reply is None:
+        # 1) Scrape commands
         subject, selector = scrape.parse_scrape_command(user_message)
         if subject:
             try:
-                url, title, text = scrape.scrape_first_result(subject, selector=selector, num_results=3, max_chars=1500)
-                heading = f"{title}\n" if title else ""
-                reply = f"Source: {url}\n{heading}\n{text}"
+                url, title, text = scrape.scrape_first_result(
+                    subject, selector=selector, num_results=3, max_chars=1500
+                )
+                title_line = f"{title}\n" if title else ""
+                # avoid accidental double blank lines
+                reply = f"Source: {url}\n{title_line}{text}".strip()
             except Exception as e:
                 reply = f"Could not fetch content ({e})."
 
-    # 2) Link handler
     if reply is None:
+        # 2) Quick facts (phone/address/hours/email/website)
+        handled, qf_reply = quickfacts.handle(user_message)
+        if handled:
+            reply = qf_reply
+
+    if reply is None:
+        # 3) Links (buy/search/link-to)
         handled, link_reply = link.handle(user_message, max_results=3)
         if handled:
             reply = link_reply
 
-    # 3) Topic KB (routed then all-topic fallback)
     if reply is None:
+        # 4) Topic KB (routed → all topics)
         topics = route_topics(user_message, top_k=2)
         for t in topics:
             entries = load_topic(t)
@@ -277,22 +295,24 @@ def generate_reply(user_message):
                 if reply:
                     break
 
-    # 4) Learning flow
-    learn_state = (sess.get("vars") or {}).get("learn", {}).get("state", "idle")
-    if reply is None or learn_state in ("await_topic","await_reply","await_new_topic_keywords"):
+    if reply is None:
+        # 5) Learning flow (start it if needed)
         handled, learn_reply = LEARNER.handle(sess, user_message)
         if handled:
             reply = learn_reply
 
-    # 5) Fallback
     if reply is None:
+        # 6) Friendly fallback
         reply = simple_ai_reply(sess, user_message)
 
+    # Persist history
     with LOCK:
         sess["history"].append(("user", user_message))
         sess["history"] = sess["history"][-10:]
         sess["history"].append(("assistant", reply))
+
     return sid, reply
+
 
 
 
