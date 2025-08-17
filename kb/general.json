@@ -1,0 +1,60 @@
+[
+  {
+    "patterns": [
+      "hello",
+      "hi",
+      "hey"
+    ],
+    "reply": "Hey{comma_name}! What’s on your mind today?"
+  },
+  {
+    "patterns": [
+      "how are you",
+      "how are you doing"
+    ],
+    "reply": "I’m here and happy to chat{comma_name}. How are you feeling—1 to 10?"
+  },
+  {
+    "patterns": [
+      "i feel stressed",
+      "overwhelmed"
+    ],
+    "reply": "Let’s lighten it{comma_name}. List the top 3 things on your plate; we’ll pick one tiny next step."
+  },
+  {
+    "patterns": [
+      "plan my day",
+      "daily plan",
+      "to do today"
+    ],
+    "reply": "Day plan: 1 must-do, 2 nice-to-haves, and one recharge. What’s your must-do?"
+  },
+  {
+    "patterns": [
+      "time",
+      "what time is it",
+      "current time"
+    ],
+    "reply": "time_dynamic"
+  },
+  {
+    "patterns": [
+      "thanks",
+      "thank you",
+      "merci"
+    ],
+    "reply": "Anytime{comma_name}. I’m here when you need me."
+  },
+  {
+    "patterns": [
+      "My girlfiriend started ignoring me"
+    ],
+    "reply": "Don't text her, don't watch her stories, distance yourself, and she will come back"
+  },
+  {
+    "patterns": [
+      "She sleeps with another one"
+    ],
+    "reply": "Just let her out from your life"
+  }
+]

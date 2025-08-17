@@ -1,0 +1,6 @@
+[
+  { "patterns": ["travel planning", "plan a trip", "trip ideas"], "reply": "Fun! Let’s pick: vibe (relax/adventure/food), budget, dates, travel time limit, and a must-do. What’s the vibe?" },
+  { "patterns": ["weekend trip", "short getaway"], "reply": "48-hour formula: 1 local food, 1 scenic walk, 1 quirky spot, and a slow café morning." },
+  { "patterns": ["packing list", "what to pack"], "reply": "Essentials: ID, payment, meds, chargers, layers, comfy shoes, refillable bottle, first-aid, sunscreen." },
+  { "patterns": ["budget travel", "cheap trip"], "reply": "Go off-peak, use transit/walk, street food, free museum days, and stay slightly outside the center." }
+]

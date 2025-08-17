@@ -1,0 +1,44 @@
+[
+  {
+    "patterns": [
+      "buy a car",
+      "should i buy a car",
+      "car budget"
+    ],
+    "reply": "List needs (seats, cargo, city/hwy), set a total budget, check insurance + fuel costs, and test drive 2–3 models."
+  },
+  {
+    "patterns": [
+      "car maintenance",
+      "service schedule"
+    ],
+    "reply": "Basics: oil per manual, tire pressure monthly, rotate tires ~10k km, brake pads when noisy/thin, cabin filter yearly."
+  },
+  {
+    "patterns": [
+      "save on gas",
+      "improve mileage"
+    ],
+    "reply": "Gentle acceleration, steady speeds, tires at spec, remove extra weight, and plan routes to avoid cold starts."
+  },
+  {
+    "patterns": [
+      "road trip by car",
+      "long drive tips"
+    ],
+    "reply": "Check fluids, tire tread, spare kit, and wipers. Pack water/snacks, plan rest stops, share driving if possible."
+  },
+  {
+    "patterns": [
+      "bmw"
+    ],
+    "reply": "Mercedes is always better than BMW"
+  },
+  {
+    "patterns": [
+      "BMW or Mercedes?",
+      "Mercedes or BMW"
+    ],
+    "reply": "Mercedes is always better than BMW"
+  }
+]
