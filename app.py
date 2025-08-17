@@ -7,6 +7,8 @@ from pathlib import Path
 from autolearn import AutoLearner
 import link  # our link.py helper
 import scrape
+import image_search  # NEW
+
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["SECRET_KEY"] = "dev-change-me"  # session cookie
@@ -236,25 +238,31 @@ def list_all_topics() -> list[str]:
 def generate_reply(user_message):
     sid, sess = get_or_make_sid()
 
-    # 0) Scrape handler: "read/scrape/summarize ..."
-    subject, selector = scrape.parse_scrape_command(user_message)
-    if subject:
-        try:
-            url, title, text = scrape.scrape_first_result(subject, selector=selector, num_results=3, max_chars=1500)
-            heading = f"{title}\n" if title else ""
-            reply = f"Source: {url}\n{heading}\n{text}"
-        except Exception as e:
-            reply = f"Could not fetch content ({e})."
+    # 0) Image requests (handled first)
+    handled, img_reply = image_search.handle(user_message)
+    if handled:
+        reply = img_reply
     else:
         reply = None
 
-    # 1) Link handler (your existing "give me the link for ...")
+    # 1) Scrape commands (if not an image request)
+    if reply is None:
+        subject, selector = scrape.parse_scrape_command(user_message)
+        if subject:
+            try:
+                url, title, text = scrape.scrape_first_result(subject, selector=selector, num_results=3, max_chars=1500)
+                heading = f"{title}\n" if title else ""
+                reply = f"Source: {url}\n{heading}\n{text}"
+            except Exception as e:
+                reply = f"Could not fetch content ({e})."
+
+    # 2) Link handler
     if reply is None:
         handled, link_reply = link.handle(user_message, max_results=3)
         if handled:
             reply = link_reply
 
-    # 2) Topic KB (routed then all-topic fallback)
+    # 3) Topic KB (routed then all-topic fallback)
     if reply is None:
         topics = route_topics(user_message, top_k=2)
         for t in topics:
@@ -269,14 +277,14 @@ def generate_reply(user_message):
                 if reply:
                     break
 
-    # 3) Learning flow (or continue)
+    # 4) Learning flow
     learn_state = (sess.get("vars") or {}).get("learn", {}).get("state", "idle")
     if reply is None or learn_state in ("await_topic","await_reply","await_new_topic_keywords"):
         handled, learn_reply = LEARNER.handle(sess, user_message)
         if handled:
             reply = learn_reply
 
-    # 4) Fallback
+    # 5) Fallback
     if reply is None:
         reply = simple_ai_reply(sess, user_message)
 
@@ -285,6 +293,7 @@ def generate_reply(user_message):
         sess["history"] = sess["history"][-10:]
         sess["history"].append(("assistant", reply))
     return sid, reply
+
 
 
 

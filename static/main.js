@@ -15,7 +15,34 @@ function addMessage(kind, text, meta) {
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.innerHTML = kind === "bot" ? linkify(text) : escapeHTML(text);
+
+  if (kind === "bot") {
+    const lines = String(text || "").split(/\r?\n/);
+    let hadContent = false;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      const url = getImageUrlFromLine(line);
+      if (url) {
+        bubble.appendChild(createImageEl(url));
+        hadContent = true;
+        continue;
+      }
+
+      const p = document.createElement("p");
+      p.innerHTML = linkify(line); // assumes linkify() is defined
+      bubble.appendChild(p);
+      hadContent = true;
+    }
+
+    if (!hadContent) {
+      bubble.innerHTML = linkify(text || "");
+    }
+  } else {
+    bubble.textContent = text || ""; // safe for user text
+  }
 
   const metaDiv = document.createElement("div");
   metaDiv.className = "meta";
@@ -40,6 +67,7 @@ function addMessage(kind, text, meta) {
   el.messages.scrollTop = el.messages.scrollHeight;
   return wrap;
 }
+
 
 function showTyping() {
   const wrap = document.createElement("div");
@@ -96,6 +124,26 @@ async function sendMessage(text) {
   } finally {
     setPending(false);
   }
+}
+
+
+// Helper: return image URL if the line is an IMG directive, else null.
+function getImageUrlFromLine(line) {
+  const m = String(line || "").trim().match(/^IMG:\s*(https?:\/\/\S+)/i);
+  return m ? m[1] : null;
+}
+
+// Helper: build a styled <img> element.
+function createImageEl(url) {
+  const img = document.createElement("img");
+  img.src = url;
+  img.alt = "image result";
+  img.loading = "lazy";
+  img.referrerPolicy = "no-referrer";
+  img.style.maxWidth = "100%";
+  img.style.borderRadius = "10px";
+  img.style.margin = "6px 0";
+  return img;
 }
 
 // --- Safe HTML helpers ---
