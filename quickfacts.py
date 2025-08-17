@@ -16,6 +16,8 @@ import re
 import json
 from urllib.parse import quote_plus, unquote, urlparse, parse_qs
 from urllib.request import Request, urlopen
+import html as ihtml  # for unescaping
+
 
 # -------------------------- Intent parsing ---------------------------------
 
@@ -188,6 +190,37 @@ def extract_addresses(text: str) -> list[str]:
                     candidates.append(combo)
     uniq = sorted(set(candidates), key=len, reverse=True)
     return uniq[:3]
+
+def _html_to_text(html: str) -> str:
+    """Crude HTML→text: drop scripts/styles, strip tags, unescape, normalize whitespace & newlines."""
+    if not html:
+        return ""
+    s = re.sub(r'(?is)<script.*?</script>|<style.*?</style>', ' ', html)
+    s = re.sub(r'(?is)<br\s*/?>', '\n', s)
+    s = re.sub(r'(?is)</p\s*>', '\n', s)
+    s = re.sub(r'(?is)<[^>]+>', ' ', s)
+    s = ihtml.unescape(s)
+    # keep some newlines so line-based extractors work
+    s = re.sub(r'\r', '\n', s)
+    s = re.sub(r'[ \t\f\v]+', ' ', s)
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    return s.strip()
+
+def _maps_direct_address(subject: str) -> tuple[str | None, str]:
+    """
+    Try to read an address directly from Google Maps (mobile UA, identity encoding).
+    We strip tags -> text and run the existing extract_addresses() on it.
+    """
+    for q in (subject, f"{subject} address"):
+        url = f"https://www.google.com/maps/search/{quote_plus(q)}?hl=en"
+        html = _fetch_html_direct(url)
+        if not html:
+            continue
+        text = _html_to_text(html)
+        addrs = extract_addresses(text)
+        if addrs:
+            return addrs[0], url
+    return None, ""
 
 def extract_hours(text: str) -> list[str]:
     lines = [ln.strip() for ln in (text or "").splitlines()]
@@ -448,7 +481,12 @@ def handle(message: str) -> tuple[bool, str]:
             if p:
                 phone, source = p, "DuckDuckGo results"
         if phone:
-            return True, f"Phone for {subject}: {_format_na_phone(phone)}\nSource: {source}"
+            maps_url = _maps_link(subject)
+            return True, (
+                f"Phone for {subject}: {_format_na_phone(phone)}\n"
+                f"Source: {source}\n"
+                f"Google Maps: {maps_url}"
+            )
 
     # EMAIL / ADDRESS / HOURS via organic pages
     for url, html, readable in _candidate_pages(subject, hint, max_candidates=5):
@@ -457,14 +495,36 @@ def handle(message: str) -> tuple[bool, str]:
             if emails:
                 return True, f"Email for {subject}: {emails[0]}\nSource: {url}"
         elif kind == "address":
-            addrs = extract_addresses(readable)
-            if addrs:
-                return True, f"Address for {subject}: {addrs[0]}\nSource: {url}"
+            # First, try Google Maps directly (robust & consistent)
+            addr, maps_src = _maps_direct_address(subject)
+            if addr:
+                maps_url = _maps_link(f"{subject} {addr}")
+                return True, (
+                    f"Address for {subject}: {addr}\n"
+                    f"Source: {maps_src}\n"
+                    f"Google Maps: {maps_url}"
+                )
+            # If not found on Maps, try organic pages (DDG results)
+            for url, html, readable in _candidate_pages(subject, hint, max_candidates=5):
+                addrs = extract_addresses(readable or _html_to_text(html))
+                if addrs:
+                    addr = addrs[0]
+                    maps_url = _maps_link(f"{subject} {addr}")
+                    return True, (
+                        f"Address for {subject}: {addr}\n"
+                        f"Source: {url}\n"
+                        f"Google Maps: {maps_url}"
+                    )
+
         elif kind == "hours":
             hrs = extract_hours(readable)
-            if hrs:
-                pretty = "\n".join(hrs)
-                return True, f"Hours for {subject}:\n{pretty}\nSource: {url}"
+            pretty = "\n".join(hrs)
+            maps_url = _maps_link(subject)
+            return True, (
+                f"Hours for {subject}:\n{pretty}\n"
+                f"Source: {url}\n"
+                f"Google Maps: {maps_url}"
+            )
 
     # Graceful fallback
     lines = [f"Couldn’t extract {kind} reliably. Try these:",
