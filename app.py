@@ -9,6 +9,7 @@ import link  # our link.py helper
 import scrape
 import image_search  # image returner
 import quickfacts  # quick facts extractor (email, phone, address...)
+import compare
 
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -62,10 +63,9 @@ def load_router(force=False):
 
 # ---------- Tokenization ----------
 STOPWORDS = {
-    # English only
-    "the","a","an","is","it","to","of","and","in","on","for","with",
-    "do","does","what","which","who","please","me","my","your","you",
-    "are","i","im","i'm","am","be","can","could","would","should"
+    "the","a","an","and","or","vs","versus","to","of","for","is","are","be",
+    "whats","what","which","who","do","does","did","i","you","we","they",
+    "it","in","on","at","by","with","from","than"
 }
 
 PUNCT = str.maketrans("", "", string.punctuation)
@@ -145,42 +145,56 @@ def load_topic(topic: str, force=False):
     return TOPIC_CACHE[topic]["entries"]
 
 # ---------- KB lookup within topic ----------
-def kb_lookup_in_entries(sess, user_text: str, entries):
-    if not entries:
-        return None
-    text = user_text.strip()
-    lower = text.lower()
+def _tok(s: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", (s or "").lower()) if w not in STOPWORDS]
 
-    # Exact match
-    for e in entries:
-        for p in e["patterns"]:
-            if lower == p.lower():
-                return render_template_reply(e["reply"], sess, user_text)
+def _f1(overlap: int, q: int, p: int) -> float:
+    if q == 0 or p == 0 or overlap == 0:
+        return 0.0
+    prec = overlap / p
+    rec  = overlap / q
+    return (2 * prec * rec) / (prec + rec)
 
-    # Token overlap scoring
-    utoks = tokenize(text)
-    if not utoks:
-        return None
+def kb_lookup_in_entries(sess, user_message: str, entries: list[dict]) -> str | None:
+    """
+    Return the best reply from entries only if there's meaningful token overlap
+    (ignoring stopwords). Prevents 'Mercedes or BMW' from matching 'i5 or i7'.
+    """
+    q_tokens = set(_tok(user_message))
+    best = None
+    best_score = 0.0
 
-    best, best_score = None, 0.0
-    for e in entries:
-        for pt in e["ptokens"]:
-            if not pt: 
+    for item in entries or []:
+        patterns = item.get("patterns") or []
+        reply = item.get("reply") or item.get("response") or ""
+        if not reply:
+            continue
+
+        for pat in patterns:
+            p_tokens = set(_tok(pat))
+            if not p_tokens:
                 continue
-            overlap = len(utoks & pt)
-            if overlap == 0:
+
+            overlap_set = q_tokens & p_tokens
+            if not overlap_set:
                 continue
-            jacc = overlap / len(utoks | pt)
-            score = jacc + 0.1 * overlap
+
+            # Require at least one NON-stopword in common (already enforced by _tok)
+            # Optional: minimum overlap size
+            if len(overlap_set) < 1:
+                continue
+
+            # Score by F1 on tokens; boost if exact substring hit
+            score = _f1(len(overlap_set), len(q_tokens), len(p_tokens))
+            if pat.lower() in (user_message or "").lower():
+                score += 0.25  # small bonus for literal phrase
+
             if score > best_score:
                 best_score = score
-                best = e
-    if best and best_score >= 0.2:
-        rep = best["reply"]
-        if rep == "time_dynamic":
-            return f"It’s {time.strftime('%H:%M')}."
-        return render_template_reply(rep, sess, user_text)
-    return None
+                best = reply
+
+    # Only accept if it looks genuinely relevant
+    return best if best_score >= 0.50 else None
 
 def render_template_reply(template: str, sess, user_text: str) -> str:
     name = (sess.get("vars") or {}).get("name", "")
@@ -237,81 +251,135 @@ def list_all_topics() -> list[str]:
 
 # ---------- Orchestrate: route → topic lookup(s) → fallback ----------
 def generate_reply(user_message):
+    """
+    Orchestrates the reply pipeline:
+
+    0) If mid-learning → continue learning (short-circuit)
+    1) Images (image_search)
+    2) Scrape commands: "read <subject> [selector]" (scrape.parse_scrape_command)
+    3) Quick facts: phone/address/hours/email/website (quickfacts.handle)
+    4) Compare: "X or Y" / "X vs Y" (compare.handle)
+    5) Links: buy/search/link-to (link.handle)
+    6) Topic KB: routed topics first, then full scan (kb_lookup_in_entries)
+    7) Learning flow start (LEARNER.handle) if still unknown
+    8) Friendly fallback (simple_ai_reply)
+
+    Always appends to session history and returns (sid, reply).
+    """
     sid, sess = get_or_make_sid()
+    msg = (user_message or "").strip()
     reply = None
 
-    # A) If we're mid-learning, handle that FIRST and short-circuit.
+    # ---- A) If we're mid-learning, handle FIRST and short-circuit ----------
     learn_state = (sess.get("vars") or {}).get("learn", {}).get("state", "idle")
     if learn_state in ("await_topic", "await_reply", "await_new_topic_keywords"):
-        handled, learn_reply = LEARNER.handle(sess, user_message)
-        if handled:
-            reply = learn_reply
+        try:
+            handled, learn_reply = LEARNER.handle(sess, msg)
+            if handled:
+                reply = learn_reply
+        except Exception as e:
+            reply = f"Sorry, I hit an error continuing training: {e}"
 
-    # B) Not mid-learning (or learner didn't handle) → normal pipeline
+    # ---- B) Normal pipeline -------------------------------------------------
+    # 0) Images
     if reply is None:
-        # 0) Images
-        handled, img_reply = image_search.handle(user_message)
-        if handled:
-            reply = img_reply
+        try:
+            handled, img_reply = image_search.handle(msg)
+            if handled:
+                reply = img_reply
+        except Exception as e:
+            # don't fail the whole request
+            reply = None
 
+    # 1) Scrape commands
     if reply is None:
-        # 1) Scrape commands
-        subject, selector = scrape.parse_scrape_command(user_message)
-        if subject:
-            try:
+        try:
+            subject, selector = scrape.parse_scrape_command(msg)
+            if subject:
                 url, title, text = scrape.scrape_first_result(
                     subject, selector=selector, num_results=3, max_chars=1500
                 )
                 title_line = f"{title}\n" if title else ""
-                # avoid accidental double blank lines
                 reply = f"Source: {url}\n{title_line}{text}".strip()
-            except Exception as e:
-                reply = f"Could not fetch content ({e})."
+        except Exception as e:
+            reply = f"Could not fetch content ({e})."
 
+    # 2) Quick facts (phone/address/hours/email/website)
     if reply is None:
-        # 2) Quick facts (phone/address/hours/email/website)
-        handled, qf_reply = quickfacts.handle(user_message)
-        if handled:
-            reply = qf_reply
+        try:
+            handled, qf_reply = quickfacts.handle(msg)
+            if handled:
+                reply = qf_reply
+        except Exception:
+            reply = None
 
+    # 3) Compare handler ("X or Y" / "X vs Y")
     if reply is None:
-        # 3) Links (buy/search/link-to)
-        handled, link_reply = link.handle(user_message, max_results=3)
-        if handled:
-            reply = link_reply
+        try:
+            handled, cmp_reply = compare.handle(msg)
+            if handled:
+                reply = cmp_reply
+        except Exception:
+            reply = None
 
+    # 4) Links (buy/search/link-to)
     if reply is None:
-        # 4) Topic KB (routed → all topics)
-        topics = route_topics(user_message, top_k=2)
-        for t in topics:
-            entries = load_topic(t)
-            reply = kb_lookup_in_entries(sess, user_message, entries)
-            if reply:
-                break
-        if reply is None:
-            for t in list_all_topics():
+        try:
+            handled, link_reply = link.handle(msg, max_results=3)
+            if handled:
+                reply = link_reply
+        except Exception:
+            reply = None
+
+    # 5) Topic KB (routed → all topics)
+    if reply is None:
+        try:
+            topics = route_topics(msg, top_k=2)
+        except Exception:
+            topics = []
+
+        # Routed topics first
+        try:
+            for t in topics:
                 entries = load_topic(t)
-                reply = kb_lookup_in_entries(sess, user_message, entries)
+                reply = kb_lookup_in_entries(sess, msg, entries)
                 if reply:
                     break
+            # If nothing yet, scan all topics
+            if reply is None:
+                for t in list_all_topics():
+                    entries = load_topic(t)
+                    reply = kb_lookup_in_entries(sess, msg, entries)
+                    if reply:
+                        break
+        except Exception:
+            reply = None
 
+    # 6) Start learning flow (if still unknown)
     if reply is None:
-        # 5) Learning flow (start it if needed)
-        handled, learn_reply = LEARNER.handle(sess, user_message)
-        if handled:
-            reply = learn_reply
+        try:
+            handled, learn_reply = LEARNER.handle(sess, msg)
+            if handled:
+                reply = learn_reply
+        except Exception as e:
+            reply = f"Sorry, I hit an error starting training: {e}"
 
+    # 7) Friendly fallback
     if reply is None:
-        # 6) Friendly fallback
-        reply = simple_ai_reply(sess, user_message)
+        try:
+            reply = simple_ai_reply(sess, msg)
+        except Exception as e:
+            reply = f"Sorry, I couldn't process that: {e}"
 
-    # Persist history
+    # ---- Persist history ----------------------------------------------------
     with LOCK:
-        sess["history"].append(("user", user_message))
+        sess.setdefault("history", [])
+        sess["history"].append(("user", msg))
         sess["history"] = sess["history"][-10:]
         sess["history"].append(("assistant", reply))
 
     return sid, reply
+
 
 
 
