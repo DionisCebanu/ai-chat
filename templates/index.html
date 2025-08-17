@@ -15,6 +15,9 @@
         <div class="subtitle">Flask • same origin (no CORS)</div>
       </div>
       <div class="status" id="status">• online</div>
+
+      <!-- Theme Switcher -->
+     <button id="theme-toggle" aria-label="Toggle theme">🌙</button>
     </header>
 
     <section class="messages" id="messages" role="log" aria-live="polite" aria-atomic="false">
@@ -37,5 +40,6 @@
 
   <!-- Load the JS after the DOM load -->
   <script src="{{ url_for('static', filename='main.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='toggle.js') }}" defer></script>
 </body>
 </html>
