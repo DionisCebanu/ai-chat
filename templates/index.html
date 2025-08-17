@@ -102,7 +102,7 @@
 
       const bubble = document.createElement("div");
       bubble.className = "bubble";
-      bubble.textContent = text;
+      bubble.innerHTML = kind === "bot" ? linkify(text) : escapeHTML(text);
 
       const metaDiv = document.createElement("div");
       metaDiv.className = "meta";
@@ -184,6 +184,25 @@
         setPending(false);
       }
     }
+
+    // --- Safe HTML helpers ---
+    function escapeHTML(str) {
+    return (str ?? "").replace(/[&<>"']/g, m => (
+        { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]
+    ));
+    }
+
+    // Turns URLs into <a>…</a> but escapes *everything else* first.
+    // Example URL patterns: http(s)://…
+    // Keeps line breaks because your CSS uses white-space: pre-wrap.
+    function linkify(text) {
+    const escaped = escapeHTML(text);
+    const urlRe = /(https?:\/\/[^\s<>()]+[^\s<>().,!?;:'")\]])/g;
+    return escaped.replace(urlRe, (url) =>
+        `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
+    );
+    }
+
 
     el.form.addEventListener("submit", (ev) => {
       ev.preventDefault();
