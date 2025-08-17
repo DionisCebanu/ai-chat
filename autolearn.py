@@ -1,304 +1,414 @@
 #!/usr/bin/env python3
 """
-Auto-learning helper for the Flask chat bot (topic-creating version).
+Auto-learning helper for the Flask chat bot (topic-creating version, refactored).
 
-Flow (state machine)
---------------------
-Unknown prompt ->
-  ask topic (existing or new) ->
-    IF new: ask for keywords (comma-separated) OR 'auto' to extract ->
-      create kb/<topic>.json and update kb/router.json ->
-    ask for the answer ->
-      append to kb/<topic>.json (merge by reply; dedupe patterns)
+Purpose
+-------
+When the bot cannot answer a user's prompt, this module runs a small
+state machine to *teach* the bot:
 
-Commands:
-- 'cancel' at any time cancels the learning flow.
+  1) Ask for a topic (existing or NEW).
+  2) If NEW: ask for routing keywords (or 'auto' to extract from the prompt),
+     then create kb/<topic>.json and update kb/router.json.
+  3) Ask for the answer text to save.
+  4) Append {"patterns":[<original prompt>], "reply": <answer>} to that topic file.
 
-Design:
-- Pure stdlib; atomic writes using os.replace
-- English-only tokenization for keyword 'auto' seeding
+Key qualities
+-------------
+- Pure standard library; no external dependencies.
+- Atomic file writes (tmp + os.replace) → safe on Windows/macOS/Linux.
+- English-only tokenization (for 'auto' keyword extraction).
+- Deduplicates entries smartly:
+    * If same reply exists, we append the new pattern to its "patterns".
+    * If identical (pattern, reply) already exists → no change.
+
+User commands
+-------------
+- 'cancel' at any step aborts the learning flow and resets state.
+
+Public API (used by app.py)
+---------------------------
+- AutoLearner(kb_dir: Path, router_file: Path)
+- handle(session: dict, user_message: str) -> (handled: bool, reply_text: str)
+- reload_router() -> bool  (no-op placeholder, returns True)
 """
 
 from __future__ import annotations
+
 from pathlib import Path
-import os, json, time, threading, re, string
 from typing import Dict, Tuple, List, Any
+import json
+import os
+import re
+import string
+import threading
+import time
 
-# --------- simple English tokenizer (for 'auto' keywords) ----------
-STOPWORDS = {
-    "the","a","an","is","it","to","of","and","in","on","for","with",
-    "do","does","what","which","who","please","me","my","your","you",
-    "are","i","im","i'm","am","be","can","could","would","should",
-    "this","that","there","here","about","from","at","as","or","if",
-    "how","when","where","why"
+# --------------------------- Tokenization utils ---------------------------
+
+# English-only stopwords for lightweight keyword extraction during 'auto'.
+STOPWORDS: set[str] = {
+    "the", "a", "an", "is", "it", "to", "of", "and", "in", "on", "for", "with",
+    "do", "does", "what", "which", "who", "please", "me", "my", "your", "you",
+    "are", "i", "im", "i'm", "am", "be", "can", "could", "would", "should",
+    "this", "that", "there", "here", "about", "from", "at", "as", "or", "if",
+    "how", "when", "where", "why"
 }
-PUNCT = str.maketrans("", "", string.punctuation)
+_PUNCT_XLATE = str.maketrans("", "", string.punctuation)
 
-def tokenize(s: str) -> List[str]:
-    s = (s or "").lower().translate(PUNCT)
-    toks = [t for t in s.split() if t and t not in STOPWORDS]
-    return toks
 
-# -------------------------------------------------------------------
+def extract_keywords(text: str, max_keywords: int = 8) -> List[str]:
+    """
+    Very small tokenizer used for seeding router keywords when the user types 'auto'.
+    Lowercases, strips punctuation, drops stopwords, keeps order and uniqueness.
+    """
+    if not text:
+        return []
+    lowered = text.lower().translate(_PUNCT_XLATE)
+    unique_seen: set[str] = set()
+    keywords: List[str] = []
+    for token in lowered.split():
+        if not token or token in STOPWORDS or token in unique_seen:
+            continue
+        unique_seen.add(token)
+        keywords.append(token)
+        if len(keywords) >= max_keywords:
+            break
+    return keywords
+
+
+# ------------------------------ AutoLearner -------------------------------
 
 class AutoLearner:
-    def __init__(self, kb_dir: Path, router_file: Path):
-        self.kb_dir = Path(kb_dir)
-        self.router_file = Path(router_file)
-        self._lock = threading.RLock()
+    """
+    Tiny state machine to capture a topic (existing or new), optional keywords,
+    and a reply, then persist it to kb/<topic>.json and kb/router.json.
+    """
+
+    # Learning states
+    _STATE_IDLE = "idle"
+    _STATE_AWAIT_TOPIC = "await_topic"
+    _STATE_AWAIT_NEW_TOPIC_KEYWORDS = "await_new_topic_keywords"
+    _STATE_AWAIT_REPLY = "await_reply"
+
+    # Default router bootstrap (if router.json doesn't exist yet)
+    _DEFAULT_ROUTER = {"general": ["hello", "hi", "thanks", "help"]}
+
+    def __init__(self, kb_dir: Path, router_file: Path) -> None:
+        self.kb_dir: Path = Path(kb_dir)
+        self.router_file: Path = Path(router_file)
+        self._fs_lock = threading.RLock()  # protects router & topic writes
+
+        # Ensure kb directory exists; bootstrap router if missing.
         self.kb_dir.mkdir(parents=True, exist_ok=True)
         if not self.router_file.exists():
-            # bootstrap a minimal router
-            self._write_router({"general": ["hello","hi","thanks","help"]})
+            self._write_router(self._DEFAULT_ROUTER)
 
-    # ---------- Public API ----------
-    def reload_router(self):
-        """No-op shim; router is read lazily from disk when needed."""
+    # --------------------------- Public methods ---------------------------
+
+    def reload_router(self) -> bool:
+        """No-op shim; kept for compatibility with app.py admin/reload."""
         return True
 
     def topics(self) -> List[str]:
-        r = self._read_router()
-        return sorted(r.keys())
+        """Return the list of topic names present in router.json (sorted)."""
+        router = self._read_router()
+        return sorted(router.keys())
 
-    def handle(self, sess: Dict[str, Any], user_text: str) -> Tuple[bool, str]:
+    def handle(self, session_obj: Dict[str, Any], user_message: str) -> Tuple[bool, str]:
         """
-        Advance or start the learning flow.
-        Returns (handled, reply_text).
+        Advance or start the learning flow for a given session.
+
+        Returns:
+          handled (bool): True if this module produced a response for this turn.
+          reply_text (str): The text to send back to the user.
         """
-        learn = self._get(sess)
-        state = learn.get("state", "idle")
+        learning_state_data = self._get_learning_state(session_obj)
+        state = learning_state_data.get("state", self._STATE_IDLE)
 
         # Global cancel
-        if (user_text or "").strip().lower() == "cancel":
-            self._reset(sess)
+        if (user_message or "").strip().lower() == "cancel":
+            self._reset_learning_state(session_obj)
             return True, "Learning canceled. Back to chat."
 
-        if state == "await_topic":
-            return True, self._step_topic(sess, user_text)
+        if state == self._STATE_AWAIT_TOPIC:
+            return True, self._step_choose_topic(session_obj, user_message)
 
-        if state == "await_new_topic_keywords":
-            return True, self._step_new_topic_keywords(sess, user_text)
+        if state == self._STATE_AWAIT_NEW_TOPIC_KEYWORDS:
+            return True, self._step_collect_new_topic_keywords(session_obj, user_message)
 
-        if state == "await_reply":
-            return True, self._step_reply(sess, user_text)
+        if state == self._STATE_AWAIT_REPLY:
+            return True, self._step_collect_answer(session_obj, user_message)
 
-        # state = idle -> begin learn
-        return True, self._start(sess, user_text)
+        # Not in a flow yet → start.
+        return True, self._start_flow(session_obj, user_message)
 
-    # ---------- Steps ----------
-    def _start(self, sess: Dict[str, Any], original_prompt: str) -> str:
-        self._set(sess, {
-            "state": "await_topic",
+    # --------------------------- State transitions ------------------------
+
+    def _start_flow(self, session_obj: Dict[str, Any], original_prompt: str) -> str:
+        """
+        Entry point when no answer was found.
+        We store the original prompt and ask for a topic.
+        """
+        self._set_learning_state(session_obj, {
+            "state": self._STATE_AWAIT_TOPIC,
             "prompt": (original_prompt or "").strip(),
             "ts": time.time(),
         })
-        options = ", ".join(self.topics())
-        return ( "Sorry, I’m not trained yet to respond to that.\n"
-                 f"What topic is this? {options} …or type a *new* topic name.\n"
-                 "Type just the topic (or type 'cancel')." )
+        available = ", ".join(self.topics())
+        return (
+            "Sorry, I’m not trained yet to respond to that.\n"
+            f"What topic is this? {available} …or type a *new* topic name.\n"
+            "Type just the topic (or type 'cancel')."
+        )
 
-    def _step_topic(self, sess: Dict[str, Any], topic_input: str) -> str:
-        topic = (topic_input or "").strip()
-        if not topic:
+    def _step_choose_topic(self, session_obj: Dict[str, Any], topic_input: str) -> str:
+        """
+        Accept an existing topic (advance directly to answer)
+        or a new topic (ask for routing keywords next).
+        """
+        proposed_topic = (topic_input or "").strip()
+        if not proposed_topic:
             return "Please type a topic (existing or new), or 'cancel'."
 
-        existing = set(self.topics())
-        if topic in existing:
-            learn = self._get(sess)
-            learn["state"] = "await_reply"
-            learn["topic"] = topic
-            self._set(sess, learn)
-            return ( f"Great — topic set to '{topic}'.\n"
-                     "Now type the answer I should reply with next time someone asks this.\n"
-                     "You can still 'cancel' to abort." )
+        existing_topics = set(self.topics())
+        if proposed_topic in existing_topics:
+            learning = self._get_learning_state(session_obj)
+            learning["state"] = self._STATE_AWAIT_REPLY
+            learning["topic"] = proposed_topic
+            self._set_learning_state(session_obj, learning)
+            return (
+                f"Great — topic set to '{proposed_topic}'.\n"
+                "Now type the answer I should reply with next time someone asks this.\n"
+                "You can still 'cancel' to abort."
+            )
 
-        # new topic -> ask for keywords
-        learn = self._get(sess)
-        learn["state"] = "await_new_topic_keywords"
-        learn["new_topic"] = topic
-        self._set(sess, learn)
-        return ( f"New topic '{topic}' — nice!\n"
-                 "Type a few *keywords* for routing (comma-separated), e.g. 'mercedes, bmw, car'.\n"
-                 "Or type 'auto' to let me extract keywords from your question." )
+        # New topic path → gather routing keywords.
+        learning = self._get_learning_state(session_obj)
+        learning["state"] = self._STATE_AWAIT_NEW_TOPIC_KEYWORDS
+        learning["new_topic"] = proposed_topic
+        self._set_learning_state(session_obj, learning)
+        return (
+            f"New topic '{proposed_topic}' — nice!\n"
+            "Type a few *keywords* for routing (comma-separated), e.g. 'mercedes, bmw, car'.\n"
+            "Or type 'auto' to let me extract keywords from your question."
+        )
 
-    def _step_new_topic_keywords(self, sess: Dict[str, Any], kw_text: str) -> str:
-        learn = self._get(sess)
-        topic = learn.get("new_topic")
-        if not topic:
-            self._reset(sess)
+    def _step_collect_new_topic_keywords(self, session_obj: Dict[str, Any], keyword_text: str) -> str:
+        """
+        Create a new topic:
+          - collect keywords (manual list or 'auto' to extract)
+          - update router.json
+          - ensure kb/<topic>.json exists
+          - advance to answer collection
+        """
+        learning = self._get_learning_state(session_obj)
+        new_topic_name = learning.get("new_topic")
+        if not new_topic_name:
+            # Defensive: unexpected loss of state.
+            self._reset_learning_state(session_obj)
             return "Something went wrong. Let’s start over — ask me again."
 
-        kws = []
-        txt = (kw_text or "").strip()
-        if txt.lower() == "auto" or not txt:
-            # seed from original prompt
-            prompt = learn.get("prompt","")
-            toks = tokenize(prompt)
-            # keep up to 8 unique keywords
-            seen = set()
-            for t in toks:
-                if t not in seen:
-                    kws.append(t)
-                    seen.add(t)
-                if len(kws) >= 8:
-                    break
-            if not kws:
-                kws = ["misc"]  # worst-case seed
+        raw = (keyword_text or "").strip()
+        if raw.lower() == "auto" or not raw:
+            # Extract from original prompt.
+            prompt_text = learning.get("prompt", "")
+            keywords = extract_keywords(prompt_text) or ["misc"]
         else:
-            # split commas -> keywords
-            kws = [k.strip().lower() for k in txt.split(",") if k.strip()]
+            # Manual comma-separated list.
+            keywords = [kw.strip().lower() for kw in raw.split(",") if kw.strip()]
 
-        # write router + create empty topic file if missing
-        self._add_topic_to_router(topic, kws)
-        self._ensure_topic_file(topic)
+        # Persist router + topic file.
+        self._add_topic_to_router(new_topic_name, keywords)
+        self._ensure_topic_file_exists(new_topic_name)
 
-        # advance to reply
-        learn["state"] = "await_reply"
-        learn["topic"] = topic
-        learn.pop("new_topic", None)
-        self._set(sess, learn)
-        return ( f"Added topic '{topic}' with keywords: {', '.join(kws)}.\n"
-                 "Now type the answer I should reply with next time someone asks this.\n"
-                 "('cancel' to abort.)" )
+        # Advance to collecting the answer.
+        learning["state"] = self._STATE_AWAIT_REPLY
+        learning["topic"] = new_topic_name
+        learning.pop("new_topic", None)
+        self._set_learning_state(session_obj, learning)
+        return (
+            f"Added topic '{new_topic_name}' with keywords: {', '.join(keywords)}.\n"
+            "Now type the answer I should reply with next time someone asks this.\n"
+            "('cancel' to abort.)"
+        )
 
-    def _step_reply(self, sess: Dict[str, Any], reply_text: str) -> str:
-        reply = (reply_text or "").strip()
-        if not reply:
+    def _step_collect_answer(self, session_obj: Dict[str, Any], answer_text: str) -> str:
+        """
+        Final step: persist the (pattern, reply) pair into kb/<topic>.json.
+        - 'pattern' is the original unknown user prompt stored at _start_flow.
+        - 'reply' is what the user provides now.
+        """
+        reply_text = (answer_text or "").strip()
+        if not reply_text:
             return "Please type the answer text (or 'cancel')."
 
-        learn = self._get(sess)
-        topic = learn.get("topic")
-        prompt = (learn.get("prompt") or "").strip()
-        if not topic or not prompt:
-            self._reset(sess)
+        learning = self._get_learning_state(session_obj)
+        topic_name = learning.get("topic")
+        original_prompt = (learning.get("prompt") or "").strip()
+        if not topic_name or not original_prompt:
+            self._reset_learning_state(session_obj)
             return "Learning state got lost — let’s start over."
 
-        saved = self._add_entry(topic, prompt, reply)
-        self._reset(sess)
-        if saved:
-            return ( "Saved! From now on, when someone asks something like:\n"
-                     f'  “{prompt}”\n'
-                     f"I’ll reply with:\n  “{reply}”\n"
-                     f"(topic: {topic})" )
+        file_changed = self._append_or_merge_entry(topic_name, original_prompt, reply_text)
+
+        # Always reset the state after attempting to save.
+        self._reset_learning_state(session_obj)
+
+        if file_changed:
+            return (
+                "Saved! From now on, when someone asks something like:\n"
+                f'  “{original_prompt}”\n'
+                "I’ll reply with:\n"
+                f'  “{reply_text}”\n'
+                f"(topic: {topic_name})"
+            )
         else:
-            return ( "I already knew a matching entry for that pattern/reply, so nothing changed.\n"
-                     f"(topic: {topic})" )
+            return (
+                "I already knew a matching entry for that pattern/reply, so nothing changed.\n"
+                f"(topic: {topic_name})"
+            )
 
-    # ---------- Session helpers ----------
-    def _get(self, sess: Dict[str, Any]) -> Dict[str, Any]:
-        sess.setdefault("vars", {})
-        sess["vars"].setdefault("learn", {"state":"idle"})
-        return sess["vars"]["learn"]
+    # ------------------------- Session state helpers -----------------------
 
-    def _set(self, sess: Dict[str, Any], learn_dict: Dict[str, Any]) -> None:
-        sess.setdefault("vars", {})
-        sess["vars"]["learn"] = learn_dict
+    def _get_learning_state(self, session_obj: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a mutable dict for the learning sub-state within the session."""
+        session_obj.setdefault("vars", {})
+        session_obj["vars"].setdefault("learn", {"state": self._STATE_IDLE})
+        return session_obj["vars"]["learn"]
 
-    def _reset(self, sess: Dict[str, Any]) -> None:
-        sess.setdefault("vars", {})
-        sess["vars"]["learn"] = {"state":"idle"}
+    def _set_learning_state(self, session_obj: Dict[str, Any], new_state: Dict[str, Any]) -> None:
+        session_obj.setdefault("vars", {})
+        session_obj["vars"]["learn"] = new_state
 
-    # ---------- Router I/O ----------
+    def _reset_learning_state(self, session_obj: Dict[str, Any]) -> None:
+        session_obj.setdefault("vars", {})
+        session_obj["vars"]["learn"] = {"state": self._STATE_IDLE}
+
+    # ------------------------------ Router I/O -----------------------------
+
     def _read_router(self) -> Dict[str, List[str]]:
+        """Load router.json; return {} on error."""
         try:
             return json.loads(self.router_file.read_text(encoding="utf-8"))
         except Exception:
             return {}
 
-    def _write_router(self, data: Dict[str, List[str]]) -> None:
-        tmp = self.router_file.with_suffix(".json.tmp")
-        payload = json.dumps(data, ensure_ascii=False, indent=2)
-        with self._lock:
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, self.router_file)
+    def _write_router(self, router_data: Dict[str, List[str]]) -> None:
+        """
+        Atomically write router.json (pretty, UTF-8).
+        Uses a temp file + os.replace to avoid partial writes.
+        """
+        temp_path = self.router_file.with_suffix(".json.tmp")
+        payload = json.dumps(router_data, ensure_ascii=False, indent=2)
+        with self._fs_lock:
+            temp_path.write_text(payload, encoding="utf-8")
+            os.replace(temp_path, self.router_file)
 
-    def _add_topic_to_router(self, topic: str, keywords: List[str]) -> None:
-        with self._lock:
-            r = self._read_router()
-            if topic in r:
-                # merge keywords
-                old = set(k.lower() for k in r.get(topic, []))
-                for k in keywords:
-                    if k.lower() not in old:
-                        old.add(k.lower())
-                r[topic] = sorted(old)
+    def _add_topic_to_router(self, topic_name: str, keywords: List[str]) -> None:
+        """
+        Add a new topic or merge keywords with an existing topic in router.json.
+        Ensures keywords are lowercase and deduplicated.
+        """
+        with self._fs_lock:
+            router = self._read_router()
+            if topic_name in router:
+                existing = {kw.lower() for kw in router.get(topic_name, [])}
+                for kw in keywords:
+                    existing.add(kw.lower())
+                router[topic_name] = sorted(existing)
             else:
-                r[topic] = sorted({k.lower() for k in keywords})
-            self._write_router(r)
+                router[topic_name] = sorted({kw.lower() for kw in keywords})
+            self._write_router(router)
 
-    # ---------- Topic file I/O ----------
-    def _topic_path(self, topic: str) -> Path:
-        return self.kb_dir / f"{topic}.json"
+    # ---------------------------- Topic file I/O ---------------------------
 
-    def _ensure_topic_file(self, topic: str) -> None:
-        p = self._topic_path(topic)
-        if not p.exists():
-            with self._lock:
-                payload = json.dumps([], ensure_ascii=False, indent=2)
-                p.write_text(payload, encoding="utf-8")
+    def _topic_file_path(self, topic_name: str) -> Path:
+        return self.kb_dir / f"{topic_name}.json"
 
-    def _load_entries(self, topic: str) -> List[Dict[str, Any]]:
-        p = self._topic_path(topic)
-        if not p.exists():
+    def _ensure_topic_file_exists(self, topic_name: str) -> None:
+        """Create an empty list-based topic file if missing."""
+        path = self._topic_file_path(topic_name)
+        if not path.exists():
+            with self._fs_lock:
+                path.write_text("[]\n", encoding="utf-8")
+
+    def _load_topic_entries(self, topic_name: str) -> List[Dict[str, Any]]:
+        """
+        Load the topic JSON and normalize to a list of {patterns: [str], reply: str}.
+        Supports legacy dict format {pattern: reply}.
+        """
+        path = self._topic_file_path(topic_name)
+        if not path.exists():
             return []
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return []
-        entries = []
-        if isinstance(data, dict):
-            for pat, rep in data.items():
-                entries.append({"patterns":[str(pat)], "reply":str(rep)})
-        elif isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict) and "reply" in item:
-                    pats = item.get("patterns") or []
-                    if isinstance(pats, list):
-                        pats = [p for p in pats if isinstance(p, str) and p.strip()]
-                    else:
-                        pats = []
-                    entries.append({"patterns": pats, "reply": str(item["reply"])})
-        return entries
 
-    def _save_entries(self, topic: str, entries: List[Dict[str, Any]]) -> None:
-        p = self._topic_path(topic)
-        tmp = p.with_suffix(".json.tmp")
+        normalized: List[Dict[str, Any]] = []
+        if isinstance(raw, dict):
+            # Legacy: { "pattern": "reply", ... }
+            for pattern, reply in raw.items():
+                normalized.append({"patterns": [str(pattern)], "reply": str(reply)})
+        elif isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict) or "reply" not in item:
+                    continue
+                patterns_raw = item.get("patterns") or []
+                if isinstance(patterns_raw, list):
+                    patterns = [p for p in patterns_raw if isinstance(p, str) and p.strip()]
+                else:
+                    patterns = []
+                normalized.append({"patterns": patterns, "reply": str(item["reply"])})
+        return normalized
+
+    def _save_topic_entries(self, topic_name: str, entries: List[Dict[str, Any]]) -> None:
+        """
+        Atomically persist the given entries list to kb/<topic>.json (pretty, UTF-8).
+        """
+        path = self._topic_file_path(topic_name)
+        temp_path = path.with_suffix(".json.tmp")
         payload = json.dumps(entries, ensure_ascii=False, indent=2)
-        with self._lock:
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, p)
+        with self._fs_lock:
+            temp_path.write_text(payload, encoding="utf-8")
+            os.replace(temp_path, path)
 
-    def _add_entry(self, topic: str, pattern: str, reply: str) -> bool:
+    def _append_or_merge_entry(self, topic_name: str, pattern_text: str, reply_text: str) -> bool:
         """
-        Return True if file changed.
-        - If entry with same reply exists -> append pattern if new.
-        - Else -> append new entry.
+        Ensure (pattern_text, reply_text) is represented in the topic file.
+        Return True if the file changed, False if it was a no-op.
+
+        Merge strategy:
+          - If an entry already has this exact reply, append the pattern if it's new (case-insensitive).
+          - Else append a new entry with this pattern and reply.
+          - If an entry already contains this *pattern* with the same *reply*, do nothing.
         """
-        pattern_norm = pattern.strip()
-        reply_norm = reply.strip()
+        pattern_norm = (pattern_text or "").strip()
+        reply_norm = (reply_text or "").strip()
         if not pattern_norm:
             return False
 
-        with self._lock:
-            entries = self._load_entries(topic)
+        with self._fs_lock:
+            entries = self._load_topic_entries(topic_name)
 
-            # If an entry already has this (pattern, reply) -> no change
-            for e in entries:
-                pats_lower = {p.lower() for p in e.get("patterns", [])}
-                if pattern_norm.lower() in pats_lower and e.get("reply","") == reply_norm:
+            # If exact (pattern, reply) already exists → no change.
+            for entry in entries:
+                existing_patterns_lower = {p.lower() for p in entry.get("patterns", [])}
+                if pattern_norm.lower() in existing_patterns_lower and entry.get("reply", "") == reply_norm:
                     return False
 
-            # Prefer merging by reply (synonyms)
-            for e in entries:
-                if e.get("reply","") == reply_norm:
-                    if pattern_norm.lower() not in {p.lower() for p in e.get("patterns", [])}:
-                        e.setdefault("patterns", []).append(pattern_norm)
-                        self._save_entries(topic, entries)
+            # If there's an entry with the same reply → merge by adding the new pattern.
+            for entry in entries:
+                if entry.get("reply", "") == reply_norm:
+                    lower_set = {p.lower() for p in entry.get("patterns", [])}
+                    if pattern_norm.lower() not in lower_set:
+                        entry.setdefault("patterns", []).append(pattern_norm)
+                        self._save_topic_entries(topic_name, entries)
                         return True
-                    else:
-                        return False
+                    return False  # pattern already present under same reply
 
-            # Otherwise add a fresh entry
-            entries.append({"patterns":[pattern_norm], "reply":reply_norm})
-            self._save_entries(topic, entries)
+            # Otherwise, create a fresh entry.
+            entries.append({"patterns": [pattern_norm], "reply": reply_norm})
+            self._save_topic_entries(topic_name, entries)
             return True

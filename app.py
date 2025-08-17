@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify, render_template, session
 import json, uuid, re, time, threading, os, string
 from pathlib import Path
 from autolearn import AutoLearner
+import link  # our link.py helper
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["SECRET_KEY"] = "dev-change-me"  # session cookie
@@ -227,25 +228,39 @@ def simple_ai_reply(sess, user_msg):
 def generate_reply(user_message):
     sid, sess = get_or_make_sid()
 
-    # 1) Try topic-based KB first
-    topics = route_topics(user_message, top_k=2)
-    reply = None
-    for t in topics:
-        entries = load_topic(t)
-        reply = kb_lookup_in_entries(sess, user_message, entries)
-        if reply:
-            break
+    # 0) Link handler: intercept "give me the link for X" style requests
+    handled, link_reply = link.handle(user_message, max_results=3)
+    if handled:
+        reply = link_reply
+    else:
+        reply = None
 
-    # 2) Learning mode: if we didn't find a reply OR if we're in the middle
-    #    of a teach flow, autolearn handles the whole turn.
+    # 1) Try routed topics first (only if link handler didn’t answer)
+    if reply is None:
+        topics = route_topics(user_message, top_k=2)
+        for t in topics:
+            entries = load_topic(t)
+            reply = kb_lookup_in_entries(sess, user_message, entries)
+            if reply:
+                break
+
+    # 2) Safety net: search all topics if still no reply
+    if reply is None:
+        for t in list_all_topics():
+            entries = load_topic(t)
+            reply = kb_lookup_in_entries(sess, user_message, entries)
+            if reply:
+                break
+
+    # 3) Learning flow (or continue if mid-learning)
     learn_state = (sess.get("vars") or {}).get("learn", {}).get("state", "idle")
-    if not reply or learn_state in ("await_topic", "await_reply"):
+    if reply is None or learn_state in ("await_topic","await_reply","await_new_topic_keywords"):
         handled, learn_reply = LEARNER.handle(sess, user_message)
         if handled:
             reply = learn_reply
 
-    # 3) Friendly fallback if learner didn't handle for some reason
-    if not reply:
+    # 4) Friendly fallback
+    if reply is None:
         reply = simple_ai_reply(sess, user_message)
 
     with LOCK:
@@ -253,6 +268,7 @@ def generate_reply(user_message):
         sess["history"] = sess["history"][-10:]
         sess["history"].append(("assistant", reply))
     return sid, reply
+
 
 
 # ---------- Routes ----------
