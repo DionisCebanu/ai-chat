@@ -1,7 +1,64 @@
 {
-  "general": ["hello", "hi", "thanks", "help", "feeling", "mood", "plan", "routine", "goal"],
-  "travel":  ["travel", "trip", "vacation", "weekend", "packing", "flight", "hotel", "itinerary", "city"],
-  "hobbies": ["hobby", "hobbies", "art", "draw", "painting", "music", "guitar", "reading", "learn", "creative"],
-  "car":     ["car", "vehicle", "drive", "engine", "maintenance", "service", "buy", "sell", "insurance", "gas", "mileage",
-              "mercedes", "bmw", "audi", "vw", "volkswagen", "toyota", "honda", "ford", "tesla", "kia", "hyundai"]
+  "general": [
+    "hello",
+    "hi",
+    "thanks",
+    "help",
+    "feeling",
+    "mood",
+    "plan",
+    "routine",
+    "goal"
+  ],
+  "travel": [
+    "travel",
+    "trip",
+    "vacation",
+    "weekend",
+    "packing",
+    "flight",
+    "hotel",
+    "itinerary",
+    "city"
+  ],
+  "hobbies": [
+    "hobby",
+    "hobbies",
+    "art",
+    "draw",
+    "painting",
+    "music",
+    "guitar",
+    "reading",
+    "learn",
+    "creative"
+  ],
+  "car": [
+    "car",
+    "vehicle",
+    "drive",
+    "engine",
+    "maintenance",
+    "service",
+    "buy",
+    "sell",
+    "insurance",
+    "gas",
+    "mileage",
+    "mercedes",
+    "bmw",
+    "audi",
+    "vw",
+    "volkswagen",
+    "toyota",
+    "honda",
+    "ford",
+    "tesla",
+    "kia",
+    "hyundai"
+  ],
+  "phone": [
+    "iphone",
+    "samsung"
+  ]
 }

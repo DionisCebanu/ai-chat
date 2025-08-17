@@ -32,7 +32,7 @@ def get_or_make_sid():
 # ---------- Paths ----------
 KB_DIR = Path(__file__).with_name("kb")
 ROUTER_FILE = KB_DIR / "router.json"
-LEARNER = AutoLearner(KB_DIR, allowed_topics=["general","travel","hobbies","car"])
+LEARNER = AutoLearner(KB_DIR, ROUTER_FILE)
 
 # ---------- Router (topic keywords) ----------
 ROUTER = {}         # topic -> set(keywords)
