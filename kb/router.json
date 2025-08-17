@@ -1,2 +1,193 @@
 {
+  "version": 1,
+  "default_topic": "general",
+  "max_route_candidates": 2,
+  "topics": {
+    "general": {
+      "file": "kb/general.json",
+      "keywords": [
+        "general",
+        "chat",
+        "hello",
+        "hi",
+        "help",
+        "life",
+        "advice",
+        "thoughts",
+        "opinions",
+        "plans",
+        "goals",
+        "feelings",
+        "motivation",
+        "philosophy",
+        "psychology",
+        "self improvement"
+      ]
+    },
+    "travel": {
+      "file": "kb/travel.json",
+      "keywords": [
+        "travel",
+        "trip",
+        "vacation",
+        "itinerary",
+        "flight",
+        "hotel",
+        "city",
+        "country",
+        "tourist",
+        "airport",
+        "visa",
+        "montreal",
+        "toronto",
+        "new york",
+        "kyoto",
+        "japan",
+        "europe"
+      ]
+    },
+    "hobbies": {
+      "file": "kb/hobbies.json",
+      "keywords": [
+        "hobby",
+        "hobbies",
+        "gaming",
+        "reading",
+        "books",
+        "music",
+        "painting",
+        "photography",
+        "cooking",
+        "baking",
+        "gardening",
+        "fitness",
+        "running",
+        "gym",
+        "yoga",
+        "cycling"
+      ]
+    },
+    "car": {
+      "file": "kb/car.json",
+      "keywords": [
+        "car",
+        "cars",
+        "auto",
+        "automobile",
+        "vehicle",
+        "mercedes",
+        "bmw",
+        "audi",
+        "toyota",
+        "honda",
+        "tesla",
+        "porsche",
+        "sedan",
+        "suv",
+        "truck",
+        "engine",
+        "maintenance"
+      ]
+    },
+    "tech": {
+      "file": "kb/tech.json",
+      "keywords": [
+        "tech",
+        "technology",
+        "computer",
+        "cpu",
+        "gpu",
+        "laptop",
+        "desktop",
+        "phone",
+        "android",
+        "iphone",
+        "intel",
+        "amd",
+        "nvidia",
+        "i5",
+        "i7",
+        "s23",
+        "galaxy",
+        "windows",
+        "mac",
+        "linux"
+      ]
+    },
+    "friends": {
+      "file": "kb/friends.json",
+      "keywords": [
+        "friend",
+        "friends",
+        "friendship",
+        "social",
+        "meet people",
+        "hang out",
+        "party",
+        "group",
+        "community",
+        "trust"
+      ]
+    },
+    "relationships": {
+      "file": "kb/relationships.json",
+      "keywords": [
+        "relationship",
+        "relationships",
+        "dating",
+        "girlfriend",
+        "boyfriend",
+        "partner",
+        "marriage",
+        "breakup",
+        "communication",
+        "boundaries"
+      ]
+    },
+    "work": {
+      "file": "kb/work.json",
+      "keywords": [
+        "work",
+        "job",
+        "career",
+        "resume",
+        "cv",
+        "interview",
+        "productivity",
+        "time management",
+        "meeting",
+        "email",
+        "manager",
+        "coworker",
+        "remote",
+        "promotion"
+      ]
+    },
+    "health": {
+      "file": "kb/health.json",
+      "keywords": [
+        "health",
+        "wellness",
+        "sleep",
+        "diet",
+        "nutrition",
+        "exercise",
+        "training",
+        "stress",
+        "anxiety",
+        "therapy",
+        "mental"
+      ]
+    },
+    "phone": {
+      "file": "kb/phone.json",
+      "keywords": [
+        "phone",
+        "call",
+        "number",
+        "contact"
+      ],
+      "note": "Quick-facts (phone/address/hours/email) usually handles these first."
+    }
+  }
 }
