@@ -6,6 +6,7 @@ import json, uuid, re, time, threading, os, string
 from pathlib import Path
 from autolearn import AutoLearner
 import link  # our link.py helper
+import scrape
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["SECRET_KEY"] = "dev-change-me"  # session cookie
@@ -223,19 +224,37 @@ def simple_ai_reply(sess, user_msg):
     
     return "Got it. Tell me more so I can help better."
 
+def list_all_topics() -> list[str]:
+    """
+    Return all topic names that have a kb/<topic>.json file,
+    excluding the router.json file.
+    """
+    KB_DIR.mkdir(parents=True, exist_ok=True)  # ensure folder exists
+    return sorted(p.stem for p in KB_DIR.glob("*.json") if p.name != "router.json")
 
 # ---------- Orchestrate: route → topic lookup(s) → fallback ----------
 def generate_reply(user_message):
     sid, sess = get_or_make_sid()
 
-    # 0) Link handler: intercept "give me the link for X" style requests
-    handled, link_reply = link.handle(user_message, max_results=3)
-    if handled:
-        reply = link_reply
+    # 0) Scrape handler: "read/scrape/summarize ..."
+    subject, selector = scrape.parse_scrape_command(user_message)
+    if subject:
+        try:
+            url, title, text = scrape.scrape_first_result(subject, selector=selector, num_results=3, max_chars=1500)
+            heading = f"{title}\n" if title else ""
+            reply = f"Source: {url}\n{heading}\n{text}"
+        except Exception as e:
+            reply = f"Could not fetch content ({e})."
     else:
         reply = None
 
-    # 1) Try routed topics first (only if link handler didn’t answer)
+    # 1) Link handler (your existing "give me the link for ...")
+    if reply is None:
+        handled, link_reply = link.handle(user_message, max_results=3)
+        if handled:
+            reply = link_reply
+
+    # 2) Topic KB (routed then all-topic fallback)
     if reply is None:
         topics = route_topics(user_message, top_k=2)
         for t in topics:
@@ -243,23 +262,21 @@ def generate_reply(user_message):
             reply = kb_lookup_in_entries(sess, user_message, entries)
             if reply:
                 break
+        if reply is None:
+            for t in list_all_topics():
+                entries = load_topic(t)
+                reply = kb_lookup_in_entries(sess, user_message, entries)
+                if reply:
+                    break
 
-    # 2) Safety net: search all topics if still no reply
-    if reply is None:
-        for t in list_all_topics():
-            entries = load_topic(t)
-            reply = kb_lookup_in_entries(sess, user_message, entries)
-            if reply:
-                break
-
-    # 3) Learning flow (or continue if mid-learning)
+    # 3) Learning flow (or continue)
     learn_state = (sess.get("vars") or {}).get("learn", {}).get("state", "idle")
     if reply is None or learn_state in ("await_topic","await_reply","await_new_topic_keywords"):
         handled, learn_reply = LEARNER.handle(sess, user_message)
         if handled:
             reply = learn_reply
 
-    # 4) Friendly fallback
+    # 4) Fallback
     if reply is None:
         reply = simple_ai_reply(sess, user_message)
 
@@ -268,6 +285,7 @@ def generate_reply(user_message):
         sess["history"] = sess["history"][-10:]
         sess["history"].append(("assistant", reply))
     return sid, reply
+
 
 
 
