@@ -3,6 +3,7 @@
 
 from flask import Flask, request, jsonify, render_template, session
 import json, uuid, re, time, threading, string
+from flask_cors import CORS
 from pathlib import Path
 
 # Specialized tools
@@ -32,6 +33,18 @@ ENABLE_AUTOTRAIN = False       # Start learning only when explicitly asked
 # -----------------------------------------------------------------------------
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["SECRET_KEY"] = "dev-change-me"  # session cookie
+
+CORS(
+    app,
+    resources={r"/chat": {"origins": [
+        "https://aichat.dioniscode.com",
+        "https://www.aichat.dioniscode.com"
+    ]}},
+    supports_credentials=False,
+    allow_headers=["Content-Type"],
+    methods=["POST", "OPTIONS"],
+    max_age=86400,  # cache preflight (optional)
+)
 
 SESSIONS = {}                               # sid -> {"history":[(role,text)], "created_at":ts, "vars":{}}
 LOCK = threading.RLock()
