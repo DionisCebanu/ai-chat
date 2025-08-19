@@ -1,0 +1,12 @@
+{
+  "explicit_prefixes": ["ai:", "gemini:", "/ai", "/g"],
+  "keywords_any": [
+    "explain", "summarize", "summary", "rewrite", "rephrase",
+    "draft", "outline", "ideas", "brainstorm",
+    "compare", "analysis", "why", "how", "pros", "cons",
+    "code", "refactor", "pseudocode", "translate",
+    "poem", "story", "email", "cover letter", "tweet", "weather"
+  ],
+  "min_keywords": 2,
+  "stopwords": ["the","a","an","and","or","to","of","for","is","are","be","in","on","at","by","with","from"]
+}
