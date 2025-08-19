@@ -31,6 +31,9 @@ _FACT_PATTERNS = [
         re.compile(r"^(?:the\s*)?address\s+(?:of|for)\s+(?P<subject>.+)$", re.I),
         re.compile(r"^address\s*:\s*(?P<subject>.+)$", re.I),
         re.compile(r"^(?:location|where\s+is)\s+(?P<subject>.+)$", re.I),
+        # NEW:
+        re.compile(r"^(?:i\s+)?(?:need|want|looking\s+for)\s+the\s+address\s+(?:of|for)\s+(?P<subject>.+)$", re.I),
+        re.compile(r"^what\s+is\s+the\s+address\s+(?:of|for)\s+(?P<subject>.+)$", re.I),
     ]),
     ("hours", [
         re.compile(r"^(?:the\s*)?(?:hours?|opening\s*hours|business\s*hours)\s+(?:of|for)\s+(?P<subject>.+)$", re.I),
